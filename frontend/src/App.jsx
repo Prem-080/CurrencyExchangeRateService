@@ -5,7 +5,7 @@ import { useExchangeRates } from './hooks/useExchangeRates';
 import { Navbar } from './components/Navbar';
 import { FreshnessBanner } from './components/FreshnessBanner';
 import { Converter } from './components/Converter';
-import { ProBanner } from './components/ProBanner';
+
 import { RatesGrid } from './components/RatesGrid';
 import { Footer } from './components/Footer';
 
@@ -69,7 +69,7 @@ export default function App() {
         loading={loading}
       />
 
-      <ProBanner />
+
 
       <RatesGrid
         baseCurrency={baseCurrency}
