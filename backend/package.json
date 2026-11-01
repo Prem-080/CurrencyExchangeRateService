@@ -1,0 +1,22 @@
+{
+  "name": "forex-aggregation-backend",
+  "version": "1.0.0",
+  "description": "Resilient real-time currency aggregation backend with multi-source fallback",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  },
+  "keywords": [
+    "forex",
+    "currency",
+    "aggregation",
+    "resilience"
+  ],
+  "author": "",
+  "license": "ISC"
+}
