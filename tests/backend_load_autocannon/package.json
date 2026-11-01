@@ -1,0 +1,12 @@
+{
+  "name": "forex-autocannon-tests",
+  "version": "1.0.0",
+  "description": "Autocannon load test suite for ForexPulse backend",
+  "main": "load_test.js",
+  "scripts": {
+    "test:load": "node load_test.js"
+  },
+  "dependencies": {
+    "autocannon": "^7.15.0"
+  }
+}
