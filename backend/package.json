@@ -6,15 +6,11 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "test": "node test_service.js",
-    "benchmark": "node benchmark.js"
+    "test": "node ../tests/fallback_resilience.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.21.2"
-  },
-  "devDependencies": {
-    "autocannon": "^7.15.0"
   },
   "keywords": [
     "forex",
