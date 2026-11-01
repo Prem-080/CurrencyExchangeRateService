@@ -207,7 +207,7 @@ async function runTestSuite() {
 
     await engine.getRates('USD'); // populate cache
 
-    // Break all providers & expire cache
+    // Break all providers & expire cache (older than 5-minute TTL)
     engine.providers = [
       {
         name: 'Dead Provider',
@@ -216,7 +216,7 @@ async function runTestSuite() {
         },
       },
     ];
-    engine.cache.get('USD').cachedAt = Date.now() - 100000;
+    engine.cache.get('USD').cachedAt = Date.now() - (engine.cacheTtlMs + 5000);
 
     const res = await engine.getRates('USD');
     assert.strictEqual(res.status, 200);
@@ -238,6 +238,10 @@ async function runTestSuite() {
   console.log('\n================================================================');
   console.log(` RESULTS: ${passed} / ${total} TESTS PASSED`);
   console.log('================================================================\n');
+
+  if (passed !== total) {
+    process.exit(1);
+  }
 }
 
 runTestSuite();
