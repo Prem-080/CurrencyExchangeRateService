@@ -212,7 +212,12 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`ForexPulse Aggregation Service running on port ${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`ForexPulse Aggregation Service running on port ${PORT}`);
+  });
+}
+
+module.exports = { app, cache, fetchRatesFromUpstream, fetchWithTimeout, CACHE_TTL_MS };
+
 

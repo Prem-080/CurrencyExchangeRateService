@@ -1,113 +1,48 @@
 /**
- * Service Resilience & Fallback Logic Tests
- * Verifies caching, multi-source failover hierarchy, and zero-crash guarantees.
+ * Integration & Resilience Test Suite for ForexPulse Backend
+ * 
+ * Imports the ACTUAL backend Express application (backend/index.js)
+ * and directly tests its live endpoints, in-memory caching,
+ * and upstream failure recovery.
  */
 
 const assert = require('assert');
+const http = require('http');
+const { app, cache, CACHE_TTL_MS } = require('../backend/index.js');
 
-// In-memory Aggregator Engine
-class ForexAggregatorEngine {
-  constructor(options = {}) {
-    this.cacheTtlMs = options.cacheTtlMs || 5 * 60 * 1000;
-    this.cache = new Map();
-    this.providers = options.providers || [];
-  }
+let server;
+let baseUrl;
 
-  async fetchFromUpstream(base) {
-    const normalized = (base || 'USD').toUpperCase();
-    const errors = [];
-
-    for (let i = 0; i < this.providers.length; i++) {
-      const provider = this.providers[i];
-      try {
-        const res = await provider.fetch(normalized);
-        if (res && res.rates) {
-          return {
-            rates: { ...res.rates, [normalized]: 1.0 },
-            source: provider.name,
-            status: i === 0 ? 'fresh' : 'fallback',
-            isFallback: i > 0,
-            timestamp: Date.now(),
-          };
+// Helper to send HTTP GET requests to the live test server
+function get(urlPath) {
+  return new Promise((resolve, reject) => {
+    http.get(`${baseUrl}${urlPath}`, (res) => {
+      let rawData = '';
+      res.on('data', (chunk) => {
+        rawData += chunk;
+      });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(rawData);
+          resolve({ status: res.statusCode, body: parsed });
+        } catch (e) {
+          resolve({ status: res.statusCode, raw: rawData });
         }
-      } catch (err) {
-        errors.push(`${provider.name}: ${err.message}`);
-      }
-    }
-    throw new Error(`All providers failed: [${errors.join(' | ')}]`);
-  }
-
-  async getRates(baseCurrency) {
-    const base = (baseCurrency || 'USD').toUpperCase();
-    const cached = this.cache.get(base);
-    const now = Date.now();
-
-    // 1. In-memory Cache hit
-    if (cached && now - cached.cachedAt < this.cacheTtlMs) {
-      return {
-        status: 200,
-        data: {
-          base,
-          rates: cached.data.rates,
-          source: cached.data.source,
-          status: 'cached',
-          isFallback: cached.data.isFallback,
-          ageSeconds: Math.floor((now - cached.cachedAt) / 1000),
-        },
-      };
-    }
-
-    // 2. Fetch fresh via cascade
-    try {
-      const fresh = await this.fetchFromUpstream(base);
-      this.cache.set(base, { cachedAt: now, data: fresh });
-      return {
-        status: 200,
-        data: {
-          base,
-          rates: fresh.rates,
-          source: fresh.source,
-          status: fresh.status,
-          isFallback: fresh.isFallback,
-          ageSeconds: 0,
-        },
-      };
-    } catch (err) {
-      // 3. Stale cache fallback
-      if (cached) {
-        return {
-          status: 200,
-          data: {
-            base,
-            rates: cached.data.rates,
-            source: `${cached.data.source} (Stale Resilience)`,
-            status: 'fallback',
-            isFallback: true,
-            warning: 'Serving verified cached snapshot',
-          },
-        };
-      }
-
-      // 4. Emergency baseline (NEVER return 500)
-      return {
-        status: 200,
-        data: {
-          base,
-          rates: { EUR: 0.8951, GBP: 0.7852, INR: 83.42, [base]: 1.0 },
-          source: 'Internal Emergency Baseline Snapshot',
-          status: 'fallback',
-          isFallback: true,
-          warning: 'Emergency snapshot active',
-        },
-      };
-    }
-  }
+      });
+    }).on('error', reject);
+  });
 }
 
 async function runTestSuite() {
   console.log('================================================================');
-  console.log(' RUNNING RESILIENCE & FALLBACK ENGINE UNIT TESTS');
+  console.log(' TESTING ACTUAL BACKEND IMPLEMENTATION (backend/index.js)');
   console.log('================================================================\n');
+
+  // Start the actual Express app on a dynamic ephemeral port
+  server = app.listen(0);
+  const port = server.address().port;
+  baseUrl = `http://127.0.0.1:${port}`;
+  console.log(`Test Express server running at: ${baseUrl}\n`);
 
   let passed = 0;
   let total = 0;
@@ -123,117 +58,146 @@ async function runTestSuite() {
     }
   }
 
-  // Test 1: Fresh Fetch
-  await test('Initial request fetches from Primary with status: "fresh"', async () => {
-    let callCount = 0;
-    const engine = new ForexAggregatorEngine({
-      providers: [
-        {
-          name: 'Primary ECB',
-          fetch: async () => {
-            callCount++;
-            return { rates: { EUR: 0.92, INR: 83.4 } };
-          },
-        },
-      ],
+  const originalFetch = global.fetch;
+
+  try {
+    // -------------------------------------------------------------
+    // Test 1: Health check endpoint on actual Express app
+    // -------------------------------------------------------------
+    await test('GET /health returns healthy status from actual Express app', async () => {
+      const res = await get('/health');
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.status, 'healthy');
+      assert.ok(Array.isArray(res.body.cachedBases));
     });
 
-    const res = await engine.getRates('USD');
-    assert.strictEqual(res.status, 200);
-    assert.strictEqual(res.data.status, 'fresh');
-    assert.strictEqual(res.data.isFallback, false);
-    assert.strictEqual(callCount, 1);
-  });
+    // -------------------------------------------------------------
+    // Test 2: Primary fetch on actual GET /api/rates
+    // -------------------------------------------------------------
+    await test('GET /api/rates?base=USD executes actual backend and populates cache', async () => {
+      cache.clear(); // Ensure empty cache
 
-  // Test 2: In-Memory Caching
-  await test('Subsequent request within TTL returns status: "cached" with 0 API calls', async () => {
-    let callCount = 0;
-    const engine = new ForexAggregatorEngine({
-      cacheTtlMs: 5000,
-      providers: [
-        {
-          name: 'Primary ECB',
-          fetch: async () => {
-            callCount++;
-            return { rates: { EUR: 0.92 } };
-          },
-        },
-      ],
+      // Mock fetch to simulate Primary Frankfurter responding
+      global.fetch = async (url, opts) => {
+        if (url.includes('api.frankfurter.dev')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              base: 'USD',
+              rates: { EUR: 0.895, GBP: 0.785, INR: 83.42, JPY: 154.2 },
+            }),
+          };
+        }
+        throw new Error('Not primary');
+      };
+
+      const res = await get('/api/rates?base=USD');
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.base, 'USD');
+      assert.strictEqual(res.body.status, 'fresh');
+      assert.strictEqual(res.body.isFallback, false);
+      assert.strictEqual(res.body.source, 'European Central Bank (Frankfurter)');
+      assert.strictEqual(res.body.rates.EUR, 0.895);
+      assert.strictEqual(res.body.rates.USD, 1.0); // Backend injects base: 1.0
+
+      // Verify the actual cache Map in backend/index.js was populated!
+      assert.ok(cache.has('USD'), 'backend/index.js cache must contain USD');
     });
 
-    await engine.getRates('USD');
-    const cachedRes = await engine.getRates('USD');
+    // -------------------------------------------------------------
+    // Test 3: Actual In-Memory Caching on the Express app
+    // -------------------------------------------------------------
+    await test('Second GET /api/rates?base=USD hits actual in-memory cache with status "cached"', async () => {
+      let fetchCalled = false;
+      global.fetch = async () => {
+        fetchCalled = true;
+        throw new Error('Network should NOT be touched during cache hit!');
+      };
 
-    assert.strictEqual(cachedRes.data.status, 'cached');
-    assert.strictEqual(callCount, 1, 'Cache must prevent redundant upstream call');
-  });
-
-  // Test 3: Primary Failure triggers Failover
-  await test('Primary 503 error cascades seamlessly to Secondary with status: "fallback"', async () => {
-    const engine = new ForexAggregatorEngine({
-      providers: [
-        {
-          name: 'Failing Frankfurter',
-          fetch: async () => {
-            throw new Error('503 Service Unavailable');
-          },
-        },
-        {
-          name: 'Secondary open.er-api',
-          fetch: async () => {
-            return { rates: { EUR: 0.925, INR: 83.5 } };
-          },
-        },
-      ],
+      const res = await get('/api/rates?base=USD');
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.status, 'cached');
+      assert.strictEqual(res.body.isFallback, false);
+      assert.strictEqual(fetchCalled, false, 'Fetch was NOT called (served 100% from cache)');
+      assert.ok(typeof res.body.ageSeconds === 'number');
     });
 
-    const res = await engine.getRates('USD');
-    assert.strictEqual(res.status, 200);
-    assert.strictEqual(res.data.status, 'fallback');
-    assert.strictEqual(res.data.isFallback, true);
-    assert.strictEqual(res.data.source, 'Secondary open.er-api');
-  });
+    // -------------------------------------------------------------
+    // Test 4: Upstream Primary Failure triggers Failover in actual backend
+    // -------------------------------------------------------------
+    await test('Backend falls back to Secondary (open.er-api) when Frankfurter throws 503', async () => {
+      // Simulate Frankfurter failing with 503, but open.er-api succeeding
+      global.fetch = async (url, opts) => {
+        if (url.includes('api.frankfurter.dev')) {
+          return { ok: false, status: 503 }; // Primary dies
+        }
+        if (url.includes('open.er-api.com')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              result: 'success',
+              rates: { EUR: 0.896, GBP: 0.786, INR: 83.5 },
+              time_last_update_unix: Math.floor(Date.now() / 1000),
+            }),
+          };
+        }
+        throw new Error('Fallback not matched');
+      };
 
-  // Test 4: Total Outage serves Stale Cache
-  await test('Total upstream outage serves stale verified cache gracefully', async () => {
-    const engine = new ForexAggregatorEngine({
-      providers: [
-        {
-          name: 'Good Provider',
-          fetch: async () => ({ rates: { EUR: 0.91 } }),
-        },
-      ],
+      const res = await get('/api/rates?base=GBP'); // Fresh query for GBP
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.status, 'fallback');
+      assert.strictEqual(res.body.isFallback, true);
+      assert.strictEqual(res.body.source, 'ExchangeRate-API (Secondary Failover)');
+      assert.strictEqual(res.body.rates.INR, 83.5);
     });
 
-    await engine.getRates('USD'); // populate cache
+    // -------------------------------------------------------------
+    // Test 5: Total Upstream Failure serves Stale Cache gracefully
+    // -------------------------------------------------------------
+    await test('Backend serves Stale Cache when all upstreams are down and cache expired', async () => {
+      // Ensure USD is in cache, then simulate cache expired past 5-min TTL
+      assert.ok(cache.has('USD'));
+      cache.get('USD').cachedAt = Date.now() - (CACHE_TTL_MS + 10000);
 
-    // Break all providers & expire cache (older than 5-minute TTL)
-    engine.providers = [
-      {
-        name: 'Dead Provider',
-        fetch: async () => {
-          throw new Error('Network Down');
-        },
-      },
-    ];
-    engine.cache.get('USD').cachedAt = Date.now() - (engine.cacheTtlMs + 5000);
+      // Simulate ALL networks down
+      global.fetch = async () => {
+        throw new Error('ETIMEDOUT: Internet disconnected');
+      };
 
-    const res = await engine.getRates('USD');
-    assert.strictEqual(res.status, 200);
-    assert.strictEqual(res.data.status, 'fallback');
-    assert.ok(res.data.source.includes('Stale Resilience'));
-    assert.strictEqual(res.data.rates.EUR, 0.91);
-  });
+      const res = await get('/api/rates?base=USD');
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.status, 'fallback');
+      assert.strictEqual(res.body.isFallback, true);
+      assert.ok(res.body.source.includes('Stale Resilience'));
+      assert.ok(res.body.warning.includes('Serving verified cached rates'));
+    });
 
-  // Test 5: Budget Constraint Math
-  await test('5-minute TTL strictly complies with Finance $5/day (5,000 call) ceiling', async () => {
-    const minutesInDay = 1440;
-    const ttlMinutes = 5;
-    const callsPerPair = minutesInDay / ttlMinutes; // 288
-    const top15Calls = callsPerPair * 15; // 4,320
-    assert.strictEqual(top15Calls, 4320);
-    assert.ok(top15Calls < 5000);
-  });
+    // -------------------------------------------------------------
+    // Test 6: Total Outage with empty cache serves Emergency Baseline (Never 500)
+    // -------------------------------------------------------------
+    await test('Backend returns Emergency Snapshot on cold start outage (Never returns 500)', async () => {
+      cache.delete('CAD'); // Uncached currency
+
+      // All networks down
+      global.fetch = async () => {
+        throw new Error('Network Down');
+      };
+
+      const res = await get('/api/rates?base=CAD');
+      assert.strictEqual(res.status, 200, 'Must return HTTP 200, not 500');
+      assert.strictEqual(res.body.status, 'fallback');
+      assert.strictEqual(res.body.source, 'Internal Emergency Baseline Snapshot');
+      assert.ok(res.body.warning.includes('emergency baseline'));
+      assert.ok(res.body.rates.INR > 0);
+    });
+
+  } finally {
+    global.fetch = originalFetch;
+    server.close();
+  }
 
   console.log('\n================================================================');
   console.log(` RESULTS: ${passed} / ${total} TESTS PASSED`);
@@ -245,4 +209,3 @@ async function runTestSuite() {
 }
 
 runTestSuite();
-
